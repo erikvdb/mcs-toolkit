@@ -11,10 +11,10 @@ More information on the issues of MCS in Unity 2019 and other fixes can be found
 2. From <https://github.com/mcs-sdk/mcs/releases>, download and import your MCS packages. The CodeAndShaders.unitypackage and the female or male base package are mandatory; add whatever additional clothing/hair packs you have and need.
 3. Download and import mcs-toolkit.unitypackage from <https://github.com/erikvdb/mcs-toolkit/releases>, or copy this repo into your Assets folder.
 
-### Patch MCS_Importer.dll
-The MCS_Importer plugin is known to cause issues with importing morph files depending on your system's region settings. A unitypackage with patched MCS_Importer.dll is included with this toolkit release. If you have your own modified plugin(s) already, see <https://github.com/erikvdb/mcs/commit/02fac8dc6fa6a2dd14db8b4a2119d21324990d5b> for the solution to apply.
+### [Optional] Patch MCS_Importer.dll
+The MCS_Importer plugin has a bug that may cause issues with morphs during runtime, depending on your system's region settings. A unitypackage with patched MCS_Importer.dll is included with this toolkit release. If you have your own modified plugin(s) already, see <https://github.com/erikvdb/mcs/commit/02fac8dc6fa6a2dd14db8b4a2119d21324990d5b> for the solution to apply.
 
-### URP Shader support
+### [Optional] URP Shader support
 URP compatible shaders for MCS are included in the toolkit release. The toolkit includes an option to convert all MCS materials to these new shaders. The shaders can be modified in ShaderGraph.
 
 ## Usage
