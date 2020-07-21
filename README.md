@@ -8,7 +8,7 @@ More information on the issues of MCS in Unity 2019 and other fixes can be found
 
 ## Installing 
 1. Create a new project in Untiy 2019.1 or newer.
-2. From <https://github.com/mcs-sdk/mcs/releases>, download and import your MCS packages. The CodeAndShaders.unitypackage and the female or male base package are mandatory; add whatever additional clothing/hair packs you have and need.
+2. From <https://github.com/mcs-sdk/mcs/releases>, download and import your MCS packages. The CodeAndShaders.unitypackage is mandatory and needs to be installed first. Add whatever base model and additional clothing/hair packs you want.
 3. Download and import mcs-toolkit.unitypackage from <https://github.com/erikvdb/mcs-toolkit/releases>, or copy this repo into your Assets folder.
 
 ### [Optional] Patch MCS_Importer.dll
