@@ -1,6 +1,7 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEditor;
@@ -14,17 +15,24 @@ namespace RadboudVR.Avatar
 {
     public class MCSToolkit : EditorWindow
     {          
-        static ContentProcessor _activeProcess = new ContentProcessor();
+        static ContentProcessor _activeProcessor = new ContentProcessor(null);
         static ManifestSelection _manifestSelectionMethod = ManifestSelection.AutoDetect;
 
         #region Window
         
         // Detect Unity version to only show relevant conversion tools. Original MCS files were reported to work up to 2018.3
         #if UNITY_2018_4_OR_NEWER 
-            static bool _enableConvert = true;
+            static readonly bool _enableConvert = true;
         #else
-            static bool _enableConvert = false;
+            static readonly bool _enableConvert = false;
         #endif
+
+        // Version Compatibility Tag
+        #if UNITY_2021_1_OR_NEWER 
+            static readonly string compatibilityTag = "_2021compatible";
+        #else
+            static readonly string compatibilityTag = "_2019compatible";
+        #endif 
 
         static bool _showConversionGroup = true;
         static bool _showEditGroup = false;
@@ -34,8 +42,8 @@ namespace RadboudVR.Avatar
         static string _editMorphFieldText = "";
         static Vector2 _windowScroll;
         static Vector2 _editMorphScroll;
-
-        
+        static List<string> _packageFiles;
+        static List<string> _morphNames;
 
         [MenuItem("MCS/MCS Toolkit", false, 100)]
         public static void OpenWindow() 
@@ -46,8 +54,9 @@ namespace RadboudVR.Avatar
         void Update() 
         {
             // Run active process and repaint to update any progress bars.
-            if (_activeProcess.isActive) {
-                _activeProcess.Update();
+            
+            if (_activeProcessor.isActive) {
+                _activeProcessor.Update();
                 Repaint();
             }
         }
@@ -60,7 +69,7 @@ namespace RadboudVR.Avatar
             BeginFoldoutGroup("Morph Converter", ref _showConversionGroup);
             if (_showConversionGroup) {
                 using (new EditorGUI.DisabledScope(_enableConvert == true && _showAdvancedConvertSettings == false)) {
-                    if (GUILayout.Button(new GUIContent("Extract Vertex Maps", "Extract vertex maps from MCS content\n(intended for 2017.x)")) && !_activeProcess.isActive) {
+                    if (GUILayout.Button(new GUIContent("Extract Vertex Maps", "Extract vertex maps from MCS content\n(intended for 2017.x)")) && !_activeProcessor.isProcessing) {
                         ExtractVertexMaps(_useSelection);
                     }
                     if (ProcessIsActive("Extract")) {
@@ -68,7 +77,7 @@ namespace RadboudVR.Avatar
                     }
                 }
                 using (new EditorGUI.DisabledScope(_enableConvert == false && _showAdvancedConvertSettings == false)) {
-                    if (GUILayout.Button(new GUIContent("Fix Morph Data", "Convert morph data using extracted vertex maps\n(intended for 2018.4+)")) && !_activeProcess.isActive) {
+                    if (GUILayout.Button(new GUIContent("Fix Morph Data", "Convert morph data using extracted vertex maps\n(intended for 2018.4+)")) && !_activeProcessor.isProcessing) {
                         ConvertMorphData(_useSelection);
                     }
                     if (ProcessIsActive("Convert")) {
@@ -93,7 +102,7 @@ namespace RadboudVR.Avatar
                 _editMorphScroll = EditorGUILayout.BeginScrollView(_editMorphScroll, GUILayout.Height(48));
                 _editMorphFieldText = EditorGUILayout.TextArea(_editMorphFieldText, GUILayout.ExpandHeight(true));
                 EditorGUILayout.EndScrollView();
-                if (GUILayout.Button(new GUIContent("Remove Morphs From Selected Assets", "")) && !_activeProcess.isActive) {
+                if (GUILayout.Button(new GUIContent("Remove Morphs From Selected Assets", "")) && !_activeProcessor.isProcessing) {
                     HashSet<string> morphList = new HashSet<string>();
                     string[] input = _editMorphFieldText.Replace(" ", "").Split(',');
                     foreach(string morph in input) {
@@ -113,9 +122,16 @@ namespace RadboudVR.Avatar
             // Utility Group
             BeginFoldoutGroup("Utilities", ref _showUtilGroup);
             if (_showUtilGroup) {
-                if (GUILayout.Button(new GUIContent("Remove LOD Groups", "Removes LOD Group components on all selected MCS Character Managers and attached costume items in scene")) && !_activeProcess.isActive) {
+                if (GUILayout.Button(new GUIContent("Remove LOD Groups", "Removes LOD Group components on all selected MCS Character Managers and attached costume items in scene")) && !_activeProcessor.isProcessing) {
+                    RemoveLODGroups();
+                }
+                if (GUILayout.Button(new GUIContent("Remove LOD1+ Objects", "Removes all LOD objects in scene and files in project except LOD0")) && !_activeProcessor.isProcessing) {
                     RemoveLOD();
                 }
+                if (GUILayout.Button(new GUIContent("Batch Import", "Import unitypackage, no further questions asked.")) && !_activeProcessor.isProcessing) {
+                    BatchImportPackages();
+                }
+
             }
             EndFoldoutGroup();
 
@@ -124,12 +140,12 @@ namespace RadboudVR.Avatar
 
         bool ProcessIsActive(string id) 
         {
-            return _activeProcess.id == id && _activeProcess.isActive;
+            return _activeProcessor.id == id && _activeProcessor.isActive;
         }
 
         void ShowProgress()
         {
-            EditorGUI.ProgressBar(GUILayoutUtility.GetLastRect(), _activeProcess.GetProgress(), _activeProcess.status);
+            EditorGUI.ProgressBar(GUILayoutUtility.GetLastRect(), _activeProcessor.GetProgress(), _activeProcessor.status);
         }
 
         // Unity 2019+ has a nicer looking foldoutHeader :3
@@ -166,37 +182,39 @@ namespace RadboudVR.Avatar
         {
             List<GameObject> content = GetContent(useSelection);
             if (content.Count == 0)
+                return;                
+            
+            _activeProcessor = new ContentProcessor("Extract", content, VertexMapProcessor);
+            _activeProcessor.Start();                                    
+        } 
+
+        static void VertexMapProcessor(GameObject obj) {
+            if (obj == null)
                 return;
 
-            _activeProcess = new ContentProcessor("Extract", content, true);
-            _activeProcess.Process = delegate() {
-                GameObject obj = _activeProcess.GetObject();
-                if (obj == null)
-                    return;
+            CoreMesh[] meshes = obj.GetComponentsInChildren<CoreMesh>();
+            foreach(CoreMesh mesh in meshes) {
+                string collection = GetCollectionName(mesh.runtimeMorphPath);
 
-                CoreMesh[] meshes = obj.GetComponentsInChildren<CoreMesh>();
-                foreach(CoreMesh mesh in meshes) {
-                    string collection = GetCollectionName(mesh.runtimeMorphPath);
+                _activeProcessor.SetStatus(collection + ":" + mesh.name);
 
-                    //_activeProcess.status = collection + ":" + mesh.name;
+                SkinnedMeshRenderer smr = mesh.GetComponent<SkinnedMeshRenderer>();
+                if (smr != null) {
+                    string collectionConversionMapPath = _conversionMapPath + ((string.IsNullOrEmpty(collection) ? "" : "/" + collection));
+                    Directory.CreateDirectory(collectionConversionMapPath);
 
-                    SkinnedMeshRenderer smr = mesh.GetComponent<SkinnedMeshRenderer>();
-                    if (smr != null) {
-                        string collectionConversionMapPath = _conversionMapPath + ((string.IsNullOrEmpty(collection) ? "" : "/" + collection));
-                        Directory.CreateDirectory(collectionConversionMapPath);
-
-                        VertexMap vertexMap = new VertexMap(smr.sharedMesh.vertices);
-                        vertexMap.WriteToDisk(collectionConversionMapPath + "/" + mesh.name + ".json");
-                    }
+                    VertexMap vertexMap = new VertexMap(smr.sharedMesh.vertices);
+                    vertexMap.WriteToDisk(collectionConversionMapPath + "/" + mesh.name + ".json");
                 }
+            }
 
-                if (_activeProcess.isLast) {
-                    if (EditorUtility.DisplayDialog("Complete!", "Extracted vertex maps were saved in Assets/MCS/ConversionMaps.\nYou can copy the files to your new Unity project.", "Show in Explorer", "Close")) {
-                        EditorUtility.RevealInFinder(_conversionMapPath);
-                    }
+            if (_activeProcessor.isLast) {
+                if (EditorUtility.DisplayDialog("Complete!", "Extracted vertex maps were saved in Assets/MCS/ConversionMaps.\nYou can copy the files to your new Unity project.", "Show in Explorer", "Close")) {
+                    EditorUtility.RevealInFinder(_conversionMapPath);
                 }
-            };
-        } 
+            }
+            _activeProcessor.OnComplete();
+        }
 
         /// <summary>
 		/// Remaps morph data for all MCS content, or only selected folders if useSelection == true.
@@ -204,7 +222,7 @@ namespace RadboudVR.Avatar
         public static void ConvertMorphData(bool useSelection)
         {
             if (!useSelection) {
-                if (!EditorUtility.DisplayDialog("Warning", "This will attempt to convert all MCS morph data in your project. This process is nonreversible.\nAre you sure?", "Yes", "Cancel"))
+                if (!EditorUtility.DisplayDialog("Warning", "This will attempt to convert all MCS morph data in your project. This process is nonreversible, and the Editor may appear unresponsive.\nAre you sure?", "Yes", "Cancel"))
                 return;
             }
 
@@ -214,101 +232,105 @@ namespace RadboudVR.Avatar
 
             // Load common conversion tools and data
             _conversionData = new ConversionData();
+            
+            _activeProcessor = new ContentProcessor("Convert", content, ConversionProcessor);
+            _activeProcessor.Start();
+            
+            
+        }
+        static void ConversionProcessor(GameObject obj) {
+            if (obj == null)
+                return;
 
-            _activeProcess = new ContentProcessor("Convert", content, true);
-            _activeProcess.Process = delegate() {
-                GameObject obj = _activeProcess.GetObject();
-                if (obj == null)
-                    return;
+            CoreMesh[] meshes = obj.GetComponentsInChildren<CoreMesh>();
+            foreach(CoreMesh mesh in meshes) {
+                //_activeProcessor.SetStatus(mesh.name + " : Checking...";
+                _conversionData.CreateReport(mesh.name);
 
-                CoreMesh[] meshes = obj.GetComponentsInChildren<CoreMesh>();
-                foreach(CoreMesh mesh in meshes) {
-                    //_activeProcess.status = mesh.name + " : Checking...";
-                    _conversionData.CreateReport(mesh.name);
-
-                    // Check if already converted
-                    if (_conversionData.GetMorphData(mesh.runtimeMorphPath, "_2019compatible") != null) {
-                        _conversionData.CloseReport("Skipped (already converted)");
-                        continue; 
-                    }
-
-                    // Check smr
-                    SkinnedMeshRenderer smr = mesh.GetComponent<SkinnedMeshRenderer>();
-                    if (smr == null) {
-                        _conversionData.CloseReport("Skipped (no SkinnedMeshRenderer found)");
-                        continue;
-                    }
-
-                    // Check for original vertex map
-                    string vmPath = "";
-                    foreach(string path in _conversionData.vertexMaps) {
-                        if (path.Contains(mesh.name + ".json")) {
-                            vmPath = path;
-                            break;
-                        }
-                    }
-                    if (vmPath == "") {
-                        _conversionData.CloseReport("Skipped (no vertex map found)");
-                        continue;
-                    }
-
-                    // Create temp directory for generated .morph files
-                    string morphPath = Path.Combine(Application.streamingAssetsPath, mesh.runtimeMorphPath);
-                    Directory.CreateDirectory(morphPath);
-
-                    // Run process                    
-                    try {
-                        // Read vertex map
-                        string mapData = File.ReadAllText(vmPath);
-                        VertexMap vertexMap = JsonUtility.FromJson<VertexMap>(mapData);
-
-                        // Generate retarget map
-                        //_activeProcess.status = mesh.name + " : Generating Target Map...";
-                        Dictionary<int, int> ttsMap = _conversionData.projectionMeshMap.GenerateTargetToSourceMap(vertexMap.vertices, smr.sharedMesh.vertices);
-                        
-                        // Get manifest
-                        var manifest = _conversionData.GetManifestForCoreMesh(mesh, _manifestSelectionMethod);
-
-                        // Process morphs
-                        int n = 0;
-                        int total = manifest.names.Length;
-                        List<string> morphNames = new List<string>(manifest.names);    
-                        morphNames.Add("base"); // Add "base" morph that's not in the manifest but is required for clothing and hair
-
-                        foreach(string morph in morphNames) {
-                            //_activeProcess.status = string.Format("{0} : Processing Morph {1}/{2}", mesh.name, n, total);
-                            n++;
-
-                            MorphData source = _conversionData.GetMorphData(morphPath, morph); // Not all assets will have all morphs
-                            if (source != null) {
-                                // Retarget morphs
-                                MorphData target = RemapMorphData(smr, source, ttsMap);
-                                // Save new .morph file
-                                MCS_Utilities.MorphExtraction.MorphExtraction.WriteMorphDataToFile(target, morphPath + "/" + target.name + ".morph", false, false);
-                            }
-                        }
-
-                        // Inject evidence of conversion so we don't accidentally remap again.
-                        MorphData note = new MorphData();
-                        note.name = "_2019compatible";
-                        MCS_Utilities.MorphExtraction.MorphExtraction.WriteMorphDataToFile(note, morphPath + "/" + note.name + ".morph",false, false);
-
-                        // Repack morphs into .morph.mr file
-                        _activeProcess.status = mesh.name + " : Repacking Morphs...";
-                        RepackMorphs(morphPath);
-
-                        _conversionData.CloseReport("Success");
-                    } catch {
-                        _conversionData.CloseReport("Failed");
-                    } finally {                        
-                        MCS_Utilities.Paths.TryDirectoryDelete(morphPath);
-                    }
+                // Check if already converted
+                if (_conversionData.GetMorphData(mesh.runtimeMorphPath, compatibilityTag) != null) {
+                    _conversionData.CloseReport("Skipped (already converted)");
+                    continue; 
                 }
 
-                if(_activeProcess.isLast) {
-                    _conversionData.PrintSummary();
+                // Check smr
+                SkinnedMeshRenderer smr = mesh.GetComponent<SkinnedMeshRenderer>();
+                if (smr == null) {
+                    _conversionData.CloseReport("Skipped (no SkinnedMeshRenderer found)");
+                    continue;
                 }
-            };
+
+                // Check for original vertex map
+                string vmPath = "";
+                foreach(string path in _conversionData.vertexMaps) {
+                    if (path.Contains(mesh.name + ".json")) {
+                        vmPath = path;
+                        break;
+                    }
+                }
+                if (vmPath == "") {
+                    _conversionData.CloseReport("Skipped (no vertex map found)");
+                    continue;
+                }
+
+                // Create temp directory for generated .morph files
+                string morphPath = Path.Combine(Application.streamingAssetsPath, mesh.runtimeMorphPath);
+                Directory.CreateDirectory(morphPath);
+
+                // Run process                    
+                try {
+                    // Read vertex map
+                    string mapData = File.ReadAllText(vmPath);
+                    VertexMap vertexMap = JsonUtility.FromJson<VertexMap>(mapData);
+
+                    // Generate retarget map
+                    //_activeProcessor.SetStatus(mesh.name + " : Generating Target Map...";
+                    Dictionary<int, int> ttsMap = _conversionData.projectionMeshMap.GenerateTargetToSourceMap(vertexMap.vertices, smr.sharedMesh.vertices);
+                    
+                    // Get manifest                        
+                    //_activeProcessor.SetStatus(mesh.name + " : Fetching Manifest...";
+                    var manifest = _conversionData.GetManifestForCoreMesh(mesh, _manifestSelectionMethod);
+
+                    // Process morphs
+                    int n = 0;
+                    int total = manifest.names.Length;
+                    List<string> morphNames = new List<string>(manifest.names);    
+                    morphNames.Add("base"); // Add "base" morph that's not in the manifest but is required for clothing and hair
+
+                    foreach(string morph in morphNames) {
+                        //_activeProcessor.SetStatus(string.Format("{0} : Processing Morph {1}/{2}", mesh.name, n, total);
+                        n++;
+
+                        MorphData source = _conversionData.GetMorphData(morphPath, morph); // Not all assets will have all morphs
+                        if (source != null) {
+                            // Retarget morphs
+                            MorphData target = RemapMorphData(smr, source, ttsMap);
+                            // Save new .morph file
+                            MCS_Utilities.MorphExtraction.MorphExtraction.WriteMorphDataToFile(target, morphPath + "/" + target.name + ".morph", false, false);
+                        }
+                    }
+
+                    // Inject evidence of conversion so we don't accidentally remap again.
+                    MorphData note = new MorphData();
+                    note.name = compatibilityTag;
+                    MCS_Utilities.MorphExtraction.MorphExtraction.WriteMorphDataToFile(note, morphPath + "/" + note.name + ".morph",false, false);
+
+                    // Repack morphs into .morph.mr file
+                    _activeProcessor.SetStatus(mesh.name + " : Repacking Morphs...");
+                    RepackMorphs(morphPath);
+
+                    _conversionData.CloseReport("Success");
+                } catch {
+                    _conversionData.CloseReport("Failed");
+                } finally {                        
+                    MCS_Utilities.Paths.TryDirectoryDelete(morphPath);
+                }
+            }
+
+            if(_activeProcessor.isLast) {
+                _conversionData.PrintSummary();
+            }
+            _activeProcessor.OnComplete();
         }
 
         /// <summary>
@@ -326,58 +348,62 @@ namespace RadboudVR.Avatar
             // Load common conversion tools and data
             _conversionData = new ConversionData();
 
-            _activeProcess = new ContentProcessor("Edit", content, true);
-            _activeProcess.Process = delegate() {
-                GameObject obj = _activeProcess.GetObject();
-                if (obj == null)
-                    return;
+            _morphNames = morphNamesToBeRemoved;
+            
+            _activeProcessor = new ContentProcessor("Edit", content, RemovalProcessor);
+            _activeProcessor.Start(); 
+        }
 
-                CoreMesh[] meshes = obj.GetComponentsInChildren<CoreMesh>();
-                foreach(CoreMesh mesh in meshes) {
-                    //_activeProcess.status = mesh.name + " : Checking...";
+        static void RemovalProcessor(GameObject obj) {
+            if (obj == null)
+                return;
 
-                    // Check smr
-                    SkinnedMeshRenderer smr = mesh.GetComponent<SkinnedMeshRenderer>();
-                    if (smr == null) {
-                        continue;
-                    }
-                    
-                    // Create temp directory for generated .morph files
-                    string morphPath = Path.Combine(Application.streamingAssetsPath, mesh.runtimeMorphPath);
-                    Directory.CreateDirectory(morphPath);
+            CoreMesh[] meshes = obj.GetComponentsInChildren<CoreMesh>();
+            foreach(CoreMesh mesh in meshes) {
+                _activeProcessor.SetStatus(mesh.name + " : Checking...");
 
-                    try {     
-                        // Get manifest
-                        var manifest = _conversionData.GetManifestForCoreMesh(mesh, _manifestSelectionMethod);
+                // Check smr
+                SkinnedMeshRenderer smr = mesh.GetComponent<SkinnedMeshRenderer>();
+                if (smr == null) {
+                    continue;
+                }
+                
+                // Create temp directory for generated .morph files
+                string morphPath = Path.Combine(Application.streamingAssetsPath, mesh.runtimeMorphPath);
+                Directory.CreateDirectory(morphPath);
 
-                        // Process morphs
-                        List<string> morphNames = new List<string>(manifest.names);    
-                        morphNames.Add("base"); // Add "base" morph that's not in the manifest but is required for clothing and hair
+                try {     
+                    // Get manifest
+                    var manifest = _conversionData.GetManifestForCoreMesh(mesh, _manifestSelectionMethod);
 
-                        foreach(string morph in morphNames) {
-                            MorphData data = _conversionData.GetMorphData(morphPath, morph);
-                            if (data != null) {
-                                if (morphNamesToBeRemoved.Contains(morph)) { 
-                                    _activeProcess.status = mesh.name + " : Removed Morph " + morph;
-                                }  else {
-                                     // Save .morph file for keeping
-                                    MCS_Utilities.MorphExtraction.MorphExtraction.WriteMorphDataToFile(data, morphPath + "/" + data.name + ".morph", false, false);
-                                }
+                    // Process morphs
+                    List<string> morphNames = new List<string>(manifest.names);    
+                    morphNames.Add("base"); // Add "base" morph that's not in the manifest but is required for clothing and hair
+
+                    foreach(string morph in morphNames) {
+                        MorphData data = _conversionData.GetMorphData(morphPath, morph);
+                        if (data != null) {
+                            if (_morphNames.Contains(morph)) { 
+                                _activeProcessor.SetStatus(mesh.name + " : Removed Morph " + morph);
+                            }  else {
+                                    // Save .morph file for keeping
+                                MCS_Utilities.MorphExtraction.MorphExtraction.WriteMorphDataToFile(data, morphPath + "/" + data.name + ".morph", false, false);
                             }
                         }
-
-                        // Repack morphs into .morph.mr file
-                        //_activeProcess.status = mesh.name + " : Rebuilding MR...";
-                        RepackMorphs(morphPath);
-
-                        //_activeProcess.status = mesh.name + " : Success!";
-                    } catch {
-                        _activeProcess.status = mesh.name + " : FAILED";
-                    } finally {                        
-                        MCS_Utilities.Paths.TryDirectoryDelete(morphPath);
                     }
+
+                    // Repack morphs into .morph.mr file
+                    _activeProcessor.SetStatus(mesh.name + " : Rebuilding MR...");
+                    RepackMorphs(morphPath);
+
+                    _activeProcessor.SetStatus(mesh.name + " : Success!");
+                } catch {
+                    _activeProcessor.SetStatus(mesh.name + " : FAILED");
+                } finally {                        
+                    MCS_Utilities.Paths.TryDirectoryDelete(morphPath);
                 }
-            };
+            }
+            _activeProcessor.OnComplete();
         }
 
         static void RepackMorphs(string root) 
@@ -502,35 +528,50 @@ namespace RadboudVR.Avatar
         // Content processor lets us update GUI while processing, to show progress bar
         class ContentProcessor
         {
-            public string id;
-            public bool isActive;
-            public int index;
-            public List<GameObject> content;
-            public string status;
-            public System.Action Process;
+            public string id {get; private set;}
+            public bool isActive {get; private set;}
+            public bool isProcessing {get; private set;}
+            public string status {get; private set;}
+            private int index;
+            private List<GameObject> content;            
+
+            public delegate void ContentProcess(GameObject obj);
+            private ContentProcess Process;
 
             public bool isLast {get {return (content == null || index + 1 >= content.Count);}}
 
-            public ContentProcessor(string id = "", List<GameObject> content = null, bool setActive = false) 
+            public ContentProcessor(string id = "",  List<GameObject> content = null, ContentProcess process = null) 
             {
                 this.id = id;
-                isActive = setActive;
-                index = 0;
-                this.content = content;
-                this.status = "Processing...";
+                this.content = content;                
+                this.Process = process;
+            }
+
+            public void Start()
+            {        
+                if (isActive) { return; }
+
+                index = -1;
+                isActive = (content != null && Process != null);   
+                if (isActive) {
+                    RunProcess();  
+                }
+            }
+
+            public void RunProcess() 
+            {
+                if (!isActive || isProcessing || Process == null || content == null || content.Count <= index) { return; }
+                index++;
+                isProcessing = true;
+                SetStatus("Processing...");
+                Process(content[index]);
             }
 
             public void Update() 
-            {
-                while (index < content.Count) {
-                    Process();
-                    index ++;
-                    break;
-                }
-                if (index == content.Count) {
-                    isActive = false;
-                    status = "Completed";
-                }
+            {                
+                if (!isProcessing && index < content.Count) {
+                    RunProcess();
+                }             
             }
 
             public GameObject GetObject() {
@@ -544,6 +585,22 @@ namespace RadboudVR.Avatar
             { 
                 return (content != null) ? (index + 1) / (float)content.Count : 0; 
             }
+
+            public void SetStatus(string status) 
+            {
+                this.status = status;
+            }
+
+            public void OnComplete()
+            {
+                isProcessing = false;
+                if (isLast) {
+                    SetStatus("Completed.");
+                    isProcessing = false;                    
+                    isActive = false;
+                }
+            }
+
         }
 
         class ConversionData 
@@ -626,7 +683,7 @@ namespace RadboudVR.Avatar
         /// <summary>
 		/// Remove LOD Group components from MCS Characters and attached Costume Items.
         /// </summary>
-        public static void RemoveLOD()
+        public static void RemoveLODGroups()
         {
             GameObject[] currentSelection = Selection.gameObjects;
             List<MCSCharacterManager> selectedManagers = new List<MCSCharacterManager>();
@@ -650,6 +707,76 @@ namespace RadboudVR.Avatar
                 }
             }
             Debug.Log("LOD Groups in selected characters have been removed.");
+        }
+        
+        /// <summary>
+		/// Remove all LOD objects apart from LOD0
+        /// </summary>
+        public static void RemoveLOD()
+        {
+            if (!EditorUtility.DisplayDialog("Warning", "This will remove ALL files and objects of LOD1, LOD2 and LOD3.\nAre you sure?", "Yes", "Cancel"))
+                return;  
+            
+            // Remove scene items
+            var sceneItems = FindObjectsOfType<CostumeItem>();
+            foreach(var item in sceneItems) {
+                int n = item.LODlist.Count;
+                if (n > 1) {
+                    List<CoreMesh> newList = new List<CoreMesh>();
+                    for(int i = 0; i < n; i++) {
+                        var obj = item.LODlist[i];
+                        if (obj.name.Contains("LOD0") || obj.name.Contains("LOD_0")) {
+                            newList.Add(obj);
+                        } else {
+                            // Check if we need to destroy a parent or just the object
+                            if (obj.transform.parent.name.Contains("LOD")) {
+                                DestroyImmediate(obj.transform.parent.gameObject);
+                            } else {
+                                DestroyImmediate(obj.gameObject);
+                            }
+                        }
+                    }
+                    item.LODlist = newList;                 
+                }
+            }
+            
+            // Remove files
+            for (int i = 1; i < 4; i++) {                
+                var lodAssets = AssetDatabase.FindAssets($"LOD{i}", new string[] {"Assets/MCS", "Assets/StreamingAssets/MCS"});
+                var altLodAssets = AssetDatabase.FindAssets($"LOD_{i}", new string[] {"Assets/MCS", "Assets/StreamingAssets/MCS"}); // some files are called LOD0 instead of LOD1
+                lodAssets = lodAssets.Concat(altLodAssets).ToArray();
+
+                foreach(var asset in lodAssets) {
+                    var path = AssetDatabase.GUIDToAssetPath(asset);
+                    if (!path.EndsWith(".fbx")) { // Keep fbx files
+                        AssetDatabase.DeleteAsset(path);
+                    }
+                }
+            }
+            
+        }
+
+        /// <summary>
+		/// Batch import all packages inside folder
+        /// </summary>
+        public static void BatchImportPackages(bool interactive=false)
+        {
+            _packageFiles = new List<string>();
+
+            string dir = EditorUtility.OpenFolderPanel("Select Package Folder", "", "");
+            if (dir.Length != 0) { 
+                string[] allFiles = Directory.GetFiles(dir);                
+                foreach(string filepath in allFiles) {
+                    if (Path.GetExtension(filepath) == ".unitypackage") {
+                        _packageFiles.Add(filepath);
+                    }
+                }
+            }
+
+            foreach (string filepath in _packageFiles) {
+                Debug.Log("Importing " + Path.GetFileName(filepath));
+                AssetDatabase.ImportPackage(filepath, interactive);
+            }
         }
 
         #endregion
